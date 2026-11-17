@@ -1,14 +1,18 @@
 package com.zeekr7x.tubedash
 
+import android.Manifest
 import android.annotation.SuppressLint
-import android.app.AlertDialog
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -28,14 +32,18 @@ import android.view.WindowManager
 import android.webkit.*
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), LocationListener {
 
     private lateinit var leftRail: LinearLayout
     private lateinit var homePage: ScrollView
     private lateinit var settingsPage: ScrollView
     private lateinit var webViewContainer: FrameLayout
     private lateinit var webView: WebView
+    private lateinit var mapsContainer: FrameLayout
+    private lateinit var mapsWebView: WebView
     private lateinit var urlBarContainer: LinearLayout
     private lateinit var urlEditText: EditText
     private lateinit var dimVeil: View
@@ -43,16 +51,23 @@ class MainActivity : AppCompatActivity() {
     private lateinit var modeCardSub: TextView
     private lateinit var pipCardSub: TextView
     private lateinit var hudInfoSub: TextView
+    private lateinit var mapsTargetSub: TextView
     private var isDimmed = false
     private var dimAlpha = 135
 
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var mediaSession: MediaSessionCompat? = null
+    private var locationManager: LocationManager? = null
+
+    private var currentNavTelemetry = NavTelemetry()
 
     companion object {
+        private const val PERMISSION_REQ_LOCATION = 1001
         private const val DESKTOP_UA =
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        private const val MOBILE_MAPS_UA =
+            "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,6 +76,7 @@ class MainActivity : AppCompatActivity() {
         hideSystemUI()
         setupCarAudioFocus()
         setupMediaSession()
+        requestLocationPermissions()
 
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#0B0D12"))
@@ -74,11 +90,11 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // 1. Persistent Left Rail (Zeekr OS 7 styling)
+        // 1. Persistent Left Rail
         leftRail = buildLeftRail()
         mainHorizontal.addView(leftRail)
 
-        // 2. Content Stack
+        // 2. Content Stack (Home / YouTube / Google Maps / Settings)
         val contentStack = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
         }
@@ -86,8 +102,10 @@ class MainActivity : AppCompatActivity() {
         homePage = buildHomePage()
         settingsPage = buildSettingsPage()
         webViewContainer = buildWebViewPlayer()
+        mapsContainer = buildMapsContainer()
 
         contentStack.addView(webViewContainer)
+        contentStack.addView(mapsContainer)
         contentStack.addView(homePage)
         contentStack.addView(settingsPage)
 
@@ -95,7 +113,7 @@ class MainActivity : AppCompatActivity() {
         mainHorizontal.addView(contentStack)
         root.addView(mainHorizontal)
 
-        // 3. Night Dim Veil (passes touches through)
+        // 3. Night Dim Overlay Veil
         dimVeil = View(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -112,25 +130,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildLeftRail(): LinearLayout {
-        val widthPx = dp(92)
+        val widthPx = dp(96)
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             setBackgroundColor(Color.parseColor("#12161F"))
-            setPadding(0, dp(16), 0, dp(16))
+            setPadding(0, dp(12), 0, dp(12))
             layoutParams = LinearLayout.LayoutParams(widthPx, ViewGroup.LayoutParams.MATCH_PARENT)
 
             addView(railItem("Home") { showTab("HOME") })
+            addView(railItem("Maps") {
+                showTab("MAPS")
+                Prefs.setCenterSource(this@MainActivity, "MAPS")
+            })
             addView(railItem("YouTube") {
                 showTab("PLAYER")
-                val target = "https://www.youtube.com"
-                if (webView.url != target) {
-                    webView.loadUrl(target)
-                }
+                Prefs.setCenterSource(this@MainActivity, "YOUTUBE")
             })
             addView(railItem("Browse") {
                 showTab("PLAYER")
-                urlBarContainer.visibility = if (urlBarContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                urlBarContainer.visibility =
+                    if (urlBarContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
             })
             addView(railItem("Pop-Up") {
                 Prefs.setOutputMode(this@MainActivity, 0)
@@ -147,6 +167,9 @@ class MainActivity : AppCompatActivity() {
                 Prefs.setLastUsedDrivingMode(this@MainActivity, 2)
                 launchDrivingOverlayOrHud(2)
             })
+            addView(railItem("Sat/Def") {
+                toggleMapLayer()
+            })
             addView(railItem("PiP") { enterCarPipMode() })
             addView(railItem("Dim") {
                 isDimmed = !isDimmed
@@ -160,31 +183,31 @@ class MainActivity : AppCompatActivity() {
         return TextView(this).apply {
             text = title
             setTextColor(Color.parseColor("#E6ECF5"))
-            textSize = 13f
+            textSize = 12f
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(16), dp(8), dp(16))
+            setPadding(dp(6), dp(12), dp(6), dp(12))
             setOnClickListener { onClick() }
         }
     }
 
     private fun buildHomePage(): ScrollView {
         return ScrollView(this).apply {
-            setPadding(dp(28), dp(22), dp(28), dp(22))
+            setPadding(dp(26), dp(18), dp(26), dp(18))
             val col = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
             }
 
             val header = TextView(this@MainActivity).apply {
-                text = "7xTubeDash · Zeekr 7X Media & HUD Suite"
+                text = "7xTubeDash 2.0 · Google Maps AR-HUD & Media Suite"
                 setTextColor(Color.WHITE)
-                textSize = 22f
+                textSize = 21f
                 setPadding(0, 0, 0, dp(4))
             }
             val subHeader = TextView(this@MainActivity).apply {
-                text = "Snapdragon 8295 · D-Gear Bypass · AR-HUD & Center Floating Player"
+                text = "Zeekr 7X Snapdragon 8295 · Independent HUD Maps & Center Pop-Up Player"
                 setTextColor(Color.parseColor("#8A94A6"))
                 textSize = 13f
-                setPadding(0, 0, 0, dp(18))
+                setPadding(0, 0, 0, dp(16))
             }
             col.addView(header)
             col.addView(subHeader)
@@ -196,7 +219,7 @@ class MainActivity : AppCompatActivity() {
 
             // Card 1: Driving Output Target
             val modeCard = createBentoCard(
-                title = "Driving Video Target",
+                title = "Driving Output Mode",
                 subtitle = modeLabel(Prefs.getOutputMode(this@MainActivity)),
                 accentColor = "#FF6B2C",
                 onTap = {
@@ -208,43 +231,47 @@ class MainActivity : AppCompatActivity() {
                 onHold = { showTab("SETTINGS") }
             )
             modeCardSub = modeCard.second
-            row1.addView(modeCard.first, LinearLayout.LayoutParams(0, dp(145), 1f).apply { rightMargin = dp(16) })
+            row1.addView(modeCard.first, LinearLayout.LayoutParams(0, dp(145), 1f).apply { rightMargin = dp(14) })
 
-            // Card 2: Launch Active Driving Mode Now
-            val launchCard = createBentoCard(
-                title = "Start Driving Window (D Bypass)",
-                subtitle = "Launches current target over Zeekr Navigation with steering wheel media controls",
-                accentColor = "#2E8BFF",
-                onTap = { launchDrivingOverlayOrHud(Prefs.getOutputMode(this@MainActivity)) },
+            // Card 2: Independent Display Targets
+            val targetCard = createBentoCard(
+                title = "Display Content Targets",
+                subtitle = "Center: ${Prefs.getCenterSource(this@MainActivity)} · AR-HUD: ${Prefs.getHudSource(this@MainActivity)}\n(Tap to switch: Maps on HUD + YouTube on Center)",
+                accentColor = "#10B981",
+                onTap = {
+                    val currentHud = Prefs.getHudSource(this@MainActivity)
+                    val newHud = if (currentHud == "MAPS") "YOUTUBE" else "MAPS"
+                    val newCenter = if (newHud == "MAPS") "YOUTUBE" else "MAPS"
+                    Prefs.setHudSource(this@MainActivity, newHud)
+                    Prefs.setCenterSource(this@MainActivity, newCenter)
+                    mapsTargetSub.text = "Center: $newCenter · AR-HUD: $newHud\n(Tap to switch: Maps on HUD + YouTube on Center)"
+                    Toast.makeText(this@MainActivity, "Target: Center=$newCenter, AR-HUD=$newHud", Toast.LENGTH_SHORT).show()
+                },
                 onHold = { showTab("SETTINGS") }
             )
-            row1.addView(launchCard.first, LinearLayout.LayoutParams(0, dp(145), 1f))
-            col.addView(row1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(16) })
+            mapsTargetSub = targetCard.second
+            row1.addView(targetCard.first, LinearLayout.LayoutParams(0, dp(145), 1f))
+            col.addView(row1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
 
             // Row 2 Bento Cards
             val row2 = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
             }
 
-            // Card 3: D-Gear Resume State
-            val pipCard = createBentoCard(
-                title = "D-Gear Shift Behavior",
-                subtitle = "Auto-Resumes: ${modeLabel(Prefs.getLastUsedDrivingMode(this@MainActivity))}\n(Remembers last used mode when shifting to D)",
-                accentColor = "#10B981",
-                onTap = {
-                    val next = (Prefs.getLastUsedDrivingMode(this@MainActivity) + 1) % 3
-                    Prefs.setLastUsedDrivingMode(this@MainActivity, next)
-                    pipCardSub.text = "Auto-Resumes: ${modeLabel(next)}\n(Remembers last used mode when shifting to D)"
-                },
-                onHold = { enterCarPipMode() }
+            // Card 3: Launch Active Driving Mode Now
+            val launchCard = createBentoCard(
+                title = "Launch Driving Pop-Up / HUD",
+                subtitle = "Starts floating player & windshield HUD projection over Zeekr Navigation",
+                accentColor = "#2E8BFF",
+                onTap = { launchDrivingOverlayOrHud(Prefs.getOutputMode(this@MainActivity)) },
+                onHold = { showTab("SETTINGS") }
             )
-            pipCardSub = pipCard.second
-            row2.addView(pipCard.first, LinearLayout.LayoutParams(0, dp(145), 1f).apply { rightMargin = dp(16) })
+            row2.addView(launchCard.first, LinearLayout.LayoutParams(0, dp(145), 1f).apply { rightMargin = dp(14) })
 
-            // Card 4: AR-HUD Display Status
+            // Card 4: AR-HUD Display Status & Telemetry
             val hudCard = createBentoCard(
-                title = "AR-HUD Status & Display Probe",
-                subtitle = detectDisplaysSummary(),
+                title = "AR-HUD Map Status",
+                subtitle = "${detectDisplaysSummary()}\nLayer: ${Prefs.getMapLayer(this@MainActivity)} · HUD Card: Enabled",
                 accentColor = "#A855F7",
                 onTap = {
                     Prefs.setOutputMode(this@MainActivity, 1)
@@ -263,16 +290,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildSettingsPage(): ScrollView {
         return ScrollView(this).apply {
-            setPadding(dp(28), dp(22), dp(28), dp(22))
+            setPadding(dp(26), dp(18), dp(26), dp(18))
             val col = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
             }
 
             val title = TextView(this@MainActivity).apply {
-                text = "HUD & Overlay Calibration (7xDash / CAMCORDER)"
+                text = "HUD & Google Maps Calibration Suite (Version 2.0)"
                 setTextColor(Color.WHITE)
                 textSize = 20f
-                setPadding(0, 0, 0, dp(14))
+                setPadding(0, 0, 0, dp(12))
             }
             col.addView(title)
 
@@ -281,16 +308,16 @@ class MainActivity : AppCompatActivity() {
             val displays = dm.displays
 
             val displayTitle = TextView(this@MainActivity).apply {
-                text = "AR-HUD Target Display (Active: Display ${Prefs.getHudDisplayId(this@MainActivity)})"
+                text = "AR-HUD Target Display ID (Active: Display ${Prefs.getHudDisplayId(this@MainActivity)})"
                 setTextColor(Color.parseColor("#E2E8F0"))
                 textSize = 15f
-                setPadding(0, 0, 0, dp(8))
+                setPadding(0, 0, 0, dp(6))
             }
             col.addView(displayTitle)
 
             val displayRow = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(0, 0, 0, dp(16))
+                setPadding(0, 0, 0, dp(14))
             }
 
             displays.forEach { disp ->
@@ -301,10 +328,10 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val selectBtn = Button(this@MainActivity).apply {
-                    text = "Use Display $id (${disp.name})"
+                    text = "Select Display $id"
                     setOnClickListener {
                         Prefs.setHudDisplayId(this@MainActivity, id)
-                        displayTitle.text = "AR-HUD Target Display (Active: Display $id)"
+                        displayTitle.text = "AR-HUD Target Display ID (Active: Display $id)"
                         Toast.makeText(this@MainActivity, "AR-HUD bound to Display $id", Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -322,9 +349,52 @@ class MainActivity : AppCompatActivity() {
             }
             col.addView(displayRow)
 
+            // Independent Target Configuration Section
+            val targetsTitle = TextView(this@MainActivity).apply {
+                text = "Display Source Routing (Multitasking Configuration)"
+                setTextColor(Color.parseColor("#E2E8F0"))
+                textSize = 15f
+                setPadding(0, 0, 0, dp(6))
+            }
+            col.addView(targetsTitle)
+
+            val targetBtnRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, 0, 0, dp(14))
+            }
+
+            val btnMapsHud = Button(this@MainActivity).apply {
+                text = "HUD: Maps | Center: YouTube"
+                setOnClickListener {
+                    Prefs.setHudSource(this@MainActivity, "MAPS")
+                    Prefs.setCenterSource(this@MainActivity, "YOUTUBE")
+                    Toast.makeText(this@MainActivity, "Configured: HUD Maps + Center YouTube", Toast.LENGTH_SHORT).show()
+                }
+            }
+            targetBtnRow.addView(btnMapsHud, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) })
+
+            val btnDualMaps = Button(this@MainActivity).apply {
+                text = "HUD: Maps | Center: Maps"
+                setOnClickListener {
+                    Prefs.setHudSource(this@MainActivity, "MAPS")
+                    Prefs.setCenterSource(this@MainActivity, "MAPS")
+                    Toast.makeText(this@MainActivity, "Configured: Dual Maps", Toast.LENGTH_SHORT).show()
+                }
+            }
+            targetBtnRow.addView(btnDualMaps, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) })
+
+            val btnSatToggle = Button(this@MainActivity).apply {
+                text = "Toggle Satellite Layer"
+                setOnClickListener {
+                    toggleMapLayer()
+                }
+            }
+            targetBtnRow.addView(btnSatToggle)
+            col.addView(targetBtnRow)
+
             // Safe-Zone Presets
             val presetLabel = TextView(this@MainActivity).apply {
-                text = "Quick AR-HUD Safe-Zone Presets (Avoid telemetry overlap)"
+                text = "AR-HUD Safe-Zone Presets (Avoid telemetry overlap)"
                 setTextColor(Color.parseColor("#CBD5E1"))
                 textSize = 14f
                 setPadding(0, 0, 0, dp(6))
@@ -333,7 +403,7 @@ class MainActivity : AppCompatActivity() {
 
             val presetRow = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(0, 0, 0, dp(16))
+                setPadding(0, 0, 0, dp(14))
             }
 
             listOf("Corner", "Banner", "Wide").forEach { name ->
@@ -342,22 +412,21 @@ class MainActivity : AppCompatActivity() {
                     setOnClickListener {
                         Prefs.applyHudPreset(this@MainActivity, name)
                         Toast.makeText(this@MainActivity, "Applied $name Preset", Toast.LENGTH_SHORT).show()
-                        showTab("SETTINGS") // refresh sliders
+                        showTab("SETTINGS")
                     }
                 }
                 presetRow.addView(btn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(10) })
             }
             col.addView(presetRow)
 
-            // HUD Size Slider
+            // Sliders
             col.addView(createSliderControl(
                 label = "AR-HUD Picture Scale (%)",
                 initial = Prefs.getHudScale(this@MainActivity),
-                max = 80,
+                max = 85,
                 onChanged = { Prefs.setHudScale(this@MainActivity, it.coerceAtLeast(20)) }
             ))
 
-            // HUD Horizontal Offset Slider
             col.addView(createSliderControl(
                 label = "AR-HUD Left / Right Offset (px)",
                 initial = Prefs.getHudOffsetX(this@MainActivity),
@@ -365,7 +434,6 @@ class MainActivity : AppCompatActivity() {
                 onChanged = { Prefs.setHudOffsetX(this@MainActivity, it) }
             ))
 
-            // HUD Vertical Offset Slider
             col.addView(createSliderControl(
                 label = "AR-HUD Up / Down Offset (px)",
                 initial = Prefs.getHudOffsetY(this@MainActivity),
@@ -373,7 +441,6 @@ class MainActivity : AppCompatActivity() {
                 onChanged = { Prefs.setHudOffsetY(this@MainActivity, it) }
             ))
 
-            // Night Dimmer Opacity Slider
             col.addView(createSliderControl(
                 label = "Night Dim Veil Darkness",
                 initial = dimAlpha,
@@ -396,7 +463,7 @@ class MainActivity : AppCompatActivity() {
     ): LinearLayout {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(6), 0, dp(14))
+            setPadding(0, dp(4), 0, dp(12))
             val txt = TextView(this@MainActivity).apply {
                 text = "$label: $initial"
                 setTextColor(Color.WHITE)
@@ -423,7 +490,6 @@ class MainActivity : AppCompatActivity() {
     private fun buildWebViewPlayer(): FrameLayout {
         val rootContainer = FrameLayout(this)
 
-        // Webview
         webView = WebView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -459,11 +525,115 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl(Prefs.getLastUrl(this))
         rootContainer.addView(webView)
 
-        // Top URL and Bookmarks Bar (collapsible)
         urlBarContainer = buildUrlBar()
         rootContainer.addView(urlBarContainer)
 
         return rootContainer
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun buildMapsContainer(): FrameLayout {
+        val container = FrameLayout(this)
+
+        mapsWebView = WebView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.parseColor("#1A1D24"))
+        }
+
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(mapsWebView, true)
+
+        mapsWebView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            setGeolocationEnabled(true)
+            mediaPlaybackRequiresUserGesture = false
+            userAgentString = MOBILE_MAPS_UA
+            useWideViewPort = true
+            loadWithOverviewMode = true
+        }
+
+        mapsWebView.webChromeClient = object : WebChromeClient() {
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?
+            ) {
+                // Grant geolocation access automatically so Google Maps can track car location
+                callback?.invoke(origin, true, false)
+            }
+        }
+
+        val bridge = MapsTelemetryBridge { telemetry ->
+            runOnUiThread {
+                currentNavTelemetry = telemetry
+            }
+        }
+        mapsWebView.addJavascriptInterface(bridge, "ZeekrNavBridge")
+
+        mapsWebView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url != null) Prefs.setLastMapUrl(this@MainActivity, url)
+                mapsWebView.evaluateJavascript(MapsTelemetryBridge.JS_INJECT_MAPS, null)
+            }
+        }
+
+        mapsWebView.loadUrl(Prefs.getLastMapUrl(this))
+        container.addView(mapsWebView)
+
+        // Maps Floating Control Strip (Satellite, Zoom +, Zoom -, Recenter, Push to HUD)
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.argb(200, 18, 22, 31))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                rightMargin = dp(16)
+                bottomMargin = dp(16)
+            }
+        }
+
+        controls.addView(mapBtn("Satellite") { toggleMapLayer() })
+        controls.addView(mapBtn("Zoom +") { mapsWebView.evaluateJavascript(MapsTelemetryBridge.JS_ZOOM_IN, null) })
+        controls.addView(mapBtn("Zoom -") { mapsWebView.evaluateJavascript(MapsTelemetryBridge.JS_ZOOM_OUT, null) })
+        controls.addView(mapBtn("Recenter") { mapsWebView.evaluateJavascript(MapsTelemetryBridge.JS_RECENTER, null) })
+        controls.addView(mapBtn("Push to HUD") {
+            val mapUrl = mapsWebView.url ?: Prefs.getLastMapUrl(this)
+            Prefs.setLastMapUrl(this, mapUrl)
+            Prefs.setHudSource(this, "MAPS")
+            Toast.makeText(this, "Pushed current Google Map to AR-HUD", Toast.LENGTH_SHORT).show()
+        })
+
+        container.addView(controls)
+        return container
+    }
+
+    private fun mapBtn(label: String, onClick: () -> Unit): Button {
+        return Button(this).apply {
+            text = label
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#1E293B"))
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun toggleMapLayer() {
+        val current = Prefs.getMapLayer(this)
+        val next = if (current == "DEFAULT") "SATELLITE" else "DEFAULT"
+        Prefs.setMapLayer(this, next)
+        val script = if (next == "SATELLITE") MapsTelemetryBridge.JS_TOGGLE_SATELLITE else MapsTelemetryBridge.JS_TOGGLE_DEFAULT
+        mapsWebView.evaluateJavascript(script, null)
+        Toast.makeText(this, "Switched Map Layer to: $next", Toast.LENGTH_SHORT).show()
     }
 
     private fun buildUrlBar(): LinearLayout {
@@ -479,7 +649,6 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.TOP
             }
 
-            // Input Row
             val inputRow = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -489,7 +658,7 @@ class MainActivity : AppCompatActivity() {
                 setText(Prefs.getLastUrl(this@MainActivity))
                 setTextColor(Color.WHITE)
                 setHintTextColor(Color.GRAY)
-                hint = "Enter video URL (e.g., https://...)"
+                hint = "Enter URL (e.g., https://...)"
                 textSize = 13f
                 isSingleLine = true
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -516,7 +685,6 @@ class MainActivity : AppCompatActivity() {
             inputRow.addView(closeBtn)
             addView(inputRow)
 
-            // Bookmarks / Quick Switcher Row
             val bookmarkRow = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, dp(4), 0, 0)
@@ -524,10 +692,10 @@ class MainActivity : AppCompatActivity() {
 
             val presets = listOf(
                 "YouTube" to "https://www.youtube.com",
+                "Google Maps" to "https://www.google.com/maps",
                 "Bilibili" to "https://www.bilibili.com",
                 "Netflix" to "https://www.netflix.com",
-                "Disney+" to "https://www.disneyplus.com",
-                "Twitch" to "https://www.twitch.tv"
+                "Disney+" to "https://www.disneyplus.com"
             )
 
             presets.forEach { (name, link) ->
@@ -538,7 +706,13 @@ class MainActivity : AppCompatActivity() {
                     setPadding(dp(8), dp(4), dp(8), dp(4))
                     setOnClickListener {
                         urlEditText.setText(link)
-                        webView.loadUrl(link)
+                        if (name == "Google Maps") {
+                            showTab("MAPS")
+                            mapsWebView.loadUrl(link)
+                        } else {
+                            showTab("PLAYER")
+                            webView.loadUrl(link)
+                        }
                         urlBarContainer.visibility = View.GONE
                     }
                 }
@@ -566,14 +740,20 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val currentUrl = webView.url ?: Prefs.getLastUrl(this)
-        Prefs.setLastUrl(this, currentUrl)
+        val videoUrl = webView.url ?: Prefs.getLastUrl(this)
+        val mapsUrl = mapsWebView.url ?: Prefs.getLastMapUrl(this)
+        Prefs.setLastUrl(this, videoUrl)
+        Prefs.setLastMapUrl(this, mapsUrl)
         Prefs.setLastUsedDrivingMode(this, targetMode)
 
         webView.onPause()
         val svc = Intent(this, OverlayHudService::class.java).apply {
-            putExtra("VIDEO_URL", currentUrl)
+            putExtra("VIDEO_URL", videoUrl)
+            putExtra("MAPS_URL", mapsUrl)
             putExtra("OUTPUT_MODE", targetMode)
+            putExtra("CENTER_SOURCE", Prefs.getCenterSource(this@MainActivity))
+            putExtra("HUD_SOURCE", Prefs.getHudSource(this@MainActivity))
+            putExtra("MAP_LAYER", Prefs.getMapLayer(this@MainActivity))
         }
         startForegroundService(svc)
         moveTaskToBack(true)
@@ -583,12 +763,16 @@ class MainActivity : AppCompatActivity() {
         val params = PictureInPictureParams.Builder()
             .setAspectRatio(Rational(16, 9))
             .build()
-        showTab("PLAYER")
+        val activeSource = Prefs.getCenterSource(this)
+        if (activeSource == "MAPS") {
+            showTab("MAPS")
+        } else {
+            showTab("PLAYER")
+        }
         leftRail.visibility = View.GONE
         enterPictureInPictureMode(params)
     }
 
-    // Triggered automatically when Zeekr OS backgrounds the app on shifting to D gear
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         val rememberedMode = Prefs.getLastUsedDrivingMode(this)
@@ -609,7 +793,9 @@ class MainActivity : AppCompatActivity() {
             homePage.visibility = View.GONE
             settingsPage.visibility = View.GONE
             urlBarContainer.visibility = View.GONE
-            webViewContainer.visibility = View.VISIBLE
+            val activeSource = Prefs.getCenterSource(this)
+            webViewContainer.visibility = if (activeSource == "YOUTUBE") View.VISIBLE else View.GONE
+            mapsContainer.visibility = if (activeSource == "MAPS") View.VISIBLE else View.GONE
         } else {
             leftRail.visibility = View.VISIBLE
         }
@@ -659,12 +845,13 @@ class MainActivity : AppCompatActivity() {
         homePage.visibility = if (tab == "HOME") View.VISIBLE else View.GONE
         settingsPage.visibility = if (tab == "SETTINGS") View.VISIBLE else View.GONE
         webViewContainer.visibility = if (tab == "PLAYER") View.VISIBLE else View.GONE
+        mapsContainer.visibility = if (tab == "MAPS") View.VISIBLE else View.GONE
     }
 
     private fun modeLabel(mode: Int): String = when (mode) {
-        0 -> "Center Screen Floating Window (Drag, Pinch, Edge-Dock)"
+        0 -> "Center Screen Floating Window Only"
         1 -> "Windshield AR-HUD Projection Only"
-        else -> "Dual Mode (Center Pop-Up + Windshield AR-HUD)"
+        else -> "Dual Mode (Center Pop-Up + AR-HUD)"
     }
 
     private fun detectDisplaysSummary(): String {
@@ -693,24 +880,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupCarAudioFocus() {
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        // Respect user decision: NO DUCKING for navigation announcements; full constant volume!
-        val focusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
-            when (focusChange) {
-                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                    // Intentionally ignore ducking requests from Zeekr navigation to keep full volume
-                }
-                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                    // Transient loss (e.g., incoming phone call)
-                }
-                AudioManager.AUDIOFOCUS_GAIN -> {
-                    // Resume normal volume
-                }
-                AudioManager.AUDIOFOCUS_LOSS -> {
-                    // Permanent loss
-                }
-            }
-        }
-
         val playbackAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
@@ -719,7 +888,7 @@ class MainActivity : AppCompatActivity() {
         audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
             .setAudioAttributes(playbackAttributes)
             .setAcceptsDelayedFocusGain(true)
-            .setOnAudioFocusChangeListener(focusChangeListener)
+            .setOnAudioFocusChangeListener { /* Ignore ducking to maintain full constant volume */ }
             .build()
 
         audioFocusRequest?.let { audioManager?.requestAudioFocus(it) }
@@ -752,25 +921,13 @@ class MainActivity : AppCompatActivity() {
                     webView.evaluateJavascript("document.querySelector('video')?.pause()", null)
                 }
 
-                override fun onFastForward() {
-                    skipVideoSeconds(10)
-                }
-
-                override fun onRewind() {
-                    skipVideoSeconds(-10)
-                }
-
-                override fun onSkipToNext() {
-                    // Steering wheel scroll up / next button skips +10s
-                    skipVideoSeconds(10)
-                }
-
-                override fun onSkipToPrevious() {
-                    // Steering wheel scroll down / prev button skips -10s
-                    skipVideoSeconds(-10)
-                }
+                override fun onFastForward() { skipVideoSeconds(10) }
+                override fun onRewind() { skipVideoSeconds(-10) }
+                override fun onSkipToNext() { skipVideoSeconds(10) }
+                override fun onSkipToPrevious() { skipVideoSeconds(-10) }
 
                 override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    @Suppress("DEPRECATION")
                     val keyEvent = mediaButtonEvent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
                     if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
                         when (keyEvent.keyCode) {
@@ -799,9 +956,7 @@ class MainActivity : AppCompatActivity() {
         val js = """
             (function() {
                 const v = document.querySelector('video');
-                if (v) {
-                    v.currentTime = Math.max(0, v.currentTime + ($seconds));
-                }
+                if (v) { v.currentTime = Math.max(0, v.currentTime + ($seconds)); }
             })();
         """.trimIndent()
         webView.evaluateJavascript(js, null)
@@ -811,15 +966,49 @@ class MainActivity : AppCompatActivity() {
         val js = """
             (function() {
                 const v = document.querySelector('video');
-                if (v) {
-                    if (v.paused) v.play(); else v.pause();
-                }
+                if (v) { if (v.paused) v.play(); else v.pause(); }
             })();
         """.trimIndent()
         webView.evaluateJavascript(js, null)
     }
 
+    private fun requestLocationPermissions() {
+        val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasFine) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                PERMISSION_REQ_LOCATION
+            )
+        } else {
+            startLocationUpdates()
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQ_LOCATION && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startLocationUpdates()
+        }
+    }
+
+    private fun startLocationUpdates() {
+        try {
+            locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 1f, this)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    override fun onLocationChanged(location: Location) {
+        // High-precision Snapdragon 8295 GNSS receiver update
+    }
+
     override fun onDestroy() {
+        locationManager?.removeUpdates(this)
         mediaSession?.release()
         audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
         super.onDestroy()

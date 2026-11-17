@@ -1,5 +1,6 @@
 package com.zeekr7x.tubedash
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,9 +9,14 @@ import android.app.Presentation
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -20,36 +26,55 @@ import android.os.Looper
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.view.*
-import android.webkit.WebChromeClient
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.webkit.*
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 
-class OverlayHudService : Service() {
+class OverlayHudService : Service(), LocationListener {
 
     private lateinit var centerWm: WindowManager
     private var centerContainer: FrameLayout? = null
     private var centerWebView: WebView? = null
+    private var centerMapsWebView: WebView? = null
 
     private var hudWm: WindowManager? = null
     private var hudContainer: FrameLayout? = null
     private var hudWebView: WebView? = null
     private var hudPresentation: Presentation? = null
 
+    // Top-Left HUD Telemetry Card views
+    private var hudTelemetryCard: LinearLayout? = null
+    private var hudManeuverIcon: TextView? = null
+    private var hudManeuverDistance: TextView? = null
+    private var hudStreetName: TextView? = null
+    private var hudTripSummary: TextView? = null
+
     private var testPatternPresentation: Presentation? = null
     private var isDocked = false
     private var isLarge = false
     private var savedX = 80
 
+    private var centerSource = "YOUTUBE"
+    private var hudSource = "MAPS"
+    private var mapLayer = "DEFAULT"
+
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var mediaSession: MediaSessionCompat? = null
+    private var locationManager: LocationManager? = null
+
+    private var currentNav = NavTelemetry()
+    private var currentSpeedKmh = 0
 
     companion object {
         const val ACTION_TEST_PATTERN = "ACTION_TEST_PATTERN"
+        private const val DESKTOP_UA =
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        private const val MOBILE_MAPS_UA =
+            "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -58,6 +83,7 @@ class OverlayHudService : Service() {
         startForegroundNotification()
         setupCarAudioFocus()
         setupMediaSession()
+        startLocationUpdates()
 
         if (intent?.action == ACTION_TEST_PATTERN) {
             val displayId = intent.getIntExtra("DISPLAY_ID", 1)
@@ -65,27 +91,32 @@ class OverlayHudService : Service() {
             return START_STICKY
         }
 
-        val url = intent?.getStringExtra("VIDEO_URL") ?: Prefs.getLastUrl(this)
-        val mode = intent?.getIntExtra("OUTPUT_MODE", Prefs.getLastUsedDrivingMode(this)) ?: 0
+        val videoUrl = intent?.getStringExtra("VIDEO_URL") ?: Prefs.getLastUrl(this)
+        val mapsUrl = intent?.getStringExtra("MAPS_URL") ?: Prefs.getLastMapUrl(this)
+        val mode = intent?.getIntExtra("OUTPUT_MODE", Prefs.getLastUsedDrivingMode(this)) ?: 2
+        centerSource = intent?.getStringExtra("CENTER_SOURCE") ?: Prefs.getCenterSource(this)
+        hudSource = intent?.getStringExtra("HUD_SOURCE") ?: Prefs.getHudSource(this)
+        mapLayer = intent?.getStringExtra("MAP_LAYER") ?: Prefs.getMapLayer(this)
+
         cleanupWindows()
 
         if (mode == 0 || mode == 2) {
-            showCenterFloatingPopUp(url)
+            showCenterFloatingPopUp(videoUrl, mapsUrl)
         }
         if (mode == 1 || mode == 2) {
-            showArHudProjection(url)
+            showArHudProjection(videoUrl, mapsUrl)
         }
 
         return START_STICKY
     }
 
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
-    private fun showCenterFloatingPopUp(url: String) {
+    private fun showCenterFloatingPopUp(videoUrl: String, mapsUrl: String) {
         centerWm = getSystemService(WINDOW_SERVICE) as WindowManager
         val density = resources.displayMetrics.density
         val screenWidth = resources.displayMetrics.widthPixels
-        val startW = (520 * density).toInt()
-        val startH = (320 * density).toInt()
+        val startW = (540 * density).toInt()
+        val startH = (330 * density).toInt()
 
         val params = WindowManager.LayoutParams(
             startW,
@@ -97,8 +128,8 @@ class OverlayHudService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 90
-            y = 90
+            x = 80
+            y = 80
         }
 
         val root = FrameLayout(this).apply {
@@ -106,10 +137,16 @@ class OverlayHudService : Service() {
             setPadding(4, 4, 4, 4)
         }
 
-        val wv = createConfiguredWebView(url)
-        root.addView(wv)
+        val wvVideo = createConfiguredVideoWebView(videoUrl)
+        val wvMaps = createConfiguredMapsWebView(mapsUrl, isHud = false)
+        centerWebView = wvVideo
+        centerMapsWebView = wvMaps
 
-        // Control strip: Dock, HUD, -10s, +10s, Full, Close
+        root.addView(wvVideo)
+        root.addView(wvMaps)
+        updateCenterSourceVisibility()
+
+        // Top Control Strip: Dock, Source, Layer, -10s, +10s, HUD, Full, Close
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
@@ -132,12 +169,29 @@ class OverlayHudService : Service() {
             centerWm.updateViewLayout(root, params)
         })
 
+        // 1-Tap Source Switcher on Floating Window (Tube ↔ Maps)
+        topBar.addView(barButton(if (centerSource == "MAPS") "To Tube" else "To Maps") {
+            centerSource = if (centerSource == "MAPS") "YOUTUBE" else "MAPS"
+            Prefs.setCenterSource(this, centerSource)
+            updateCenterSourceVisibility()
+            (it as TextView).text = if (centerSource == "MAPS") "To Tube" else "To Maps"
+        })
+
+        topBar.addView(barButton("Layer") {
+            mapLayer = if (mapLayer == "DEFAULT") "SATELLITE" else "DEFAULT"
+            Prefs.setMapLayer(this, mapLayer)
+            val script = if (mapLayer == "SATELLITE") MapsTelemetryBridge.JS_TOGGLE_SATELLITE else MapsTelemetryBridge.JS_TOGGLE_DEFAULT
+            centerMapsWebView?.evaluateJavascript(script, null)
+            hudWebView?.evaluateJavascript(script, null)
+            Toast.makeText(this, "Layer: $mapLayer", Toast.LENGTH_SHORT).show()
+        })
+
         topBar.addView(barButton("-10s") { skipVideoSeconds(-10) })
         topBar.addView(barButton("+10s") { skipVideoSeconds(10) })
 
         topBar.addView(barButton("HUD") {
             if (hudContainer == null && hudPresentation == null) {
-                showArHudProjection(wv.url ?: url)
+                showArHudProjection(videoUrl, mapsUrl)
             } else {
                 removeHudProjection()
             }
@@ -156,8 +210,8 @@ class OverlayHudService : Service() {
         val scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 val factor = detector.scaleFactor
-                params.width = (params.width * factor).toInt().coerceIn((280 * density).toInt(), (1100 * density).toInt())
-                params.height = (params.height * factor).toInt().coerceIn((180 * density).toInt(), (700 * density).toInt())
+                params.width = (params.width * factor).toInt().coerceIn((280 * density).toInt(), (1150 * density).toInt())
+                params.height = (params.height * factor).toInt().coerceIn((180 * density).toInt(), (720 * density).toInt())
                 centerWm.updateViewLayout(root, params)
                 return true
             }
@@ -167,8 +221,8 @@ class OverlayHudService : Service() {
         val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 isLarge = !isLarge
-                params.width = ((if (isLarge) 820 else 520) * density).toInt()
-                params.height = ((if (isLarge) 480 else 320) * density).toInt()
+                params.width = ((if (isLarge) 840 else 540) * density).toInt()
+                params.height = ((if (isLarge) 500 else 330) * density).toInt()
                 centerWm.updateViewLayout(root, params)
                 return true
             }
@@ -204,7 +258,6 @@ class OverlayHudService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    // Push near right edge auto-docks into slim strip
                     if (params.x > screenWidth - (140 * density).toInt()) {
                         savedX = (screenWidth / 2)
                         params.x = screenWidth - (36 * density).toInt()
@@ -220,11 +273,20 @@ class OverlayHudService : Service() {
         root.addView(topBar)
         centerWm.addView(root, params)
         centerContainer = root
-        centerWebView = wv
+    }
+
+    private fun updateCenterSourceVisibility() {
+        if (centerSource == "MAPS") {
+            centerMapsWebView?.visibility = View.VISIBLE
+            centerWebView?.visibility = View.GONE
+        } else {
+            centerWebView?.visibility = View.VISIBLE
+            centerMapsWebView?.visibility = View.GONE
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun showArHudProjection(url: String) {
+    private fun showArHudProjection(videoUrl: String, mapsUrl: String) {
         val dm = getSystemService(DisplayManager::class.java)
         val allDisplays = dm.displays
         val preferredId = Prefs.getHudDisplayId(this)
@@ -235,18 +297,36 @@ class OverlayHudService : Service() {
         if (hudDisplay == null) {
             Toast.makeText(
                 this,
-                "AR-HUD secondary display not exposed; keeping Center Pop-Up active",
+                "AR-HUD secondary display not detected; keeping Center Pop-Up active",
                 Toast.LENGTH_LONG
             ).show()
-            if (centerContainer == null) showCenterFloatingPopUp(url)
             return
         }
 
         val hudContext = createDisplayContext(hudDisplay)
         val hudMetrics = hudContext.resources.displayMetrics
         val scalePct = Prefs.getHudScale(this) / 100f
-        val hudW = (hudMetrics.widthPixels * scalePct).toInt().coerceAtLeast(320)
+        val hudW = (hudMetrics.widthPixels * scalePct).toInt().coerceAtLeast(360)
         val hudH = (hudW * 9) / 16
+
+        // Build active HUD WebView (Google Maps by default or YouTube)
+        val activeWv = if (hudSource == "MAPS") {
+            createConfiguredMapsWebView(mapsUrl, isHud = true)
+        } else {
+            createConfiguredVideoWebView(videoUrl)
+        }
+
+        val frame = FrameLayout(hudContext).apply {
+            setBackgroundColor(Color.BLACK)
+        }
+        frame.addView(activeWv)
+
+        // Add Top-Left HUD Telemetry Card if HUD source is Maps
+        if (hudSource == "MAPS" && Prefs.isHudTelemetryCardEnabled(this)) {
+            val card = buildHudTelemetryCard(hudContext)
+            hudTelemetryCard = card
+            frame.addView(card)
+        }
 
         try {
             val wm = hudContext.getSystemService(WindowManager::class.java)
@@ -265,16 +345,12 @@ class OverlayHudService : Service() {
                 y = Prefs.getHudOffsetY(this@OverlayHudService)
             }
 
-            val frame = FrameLayout(hudContext).apply {
-                setBackgroundColor(Color.BLACK)
-            }
-            val wv = createConfiguredWebView(url)
-            frame.addView(wv)
             wm.addView(frame, hudParams)
             hudWm = wm
             hudContainer = frame
-            hudWebView = wv
+            hudWebView = activeWv
         } catch (e: Exception) {
+            // Presentation Fallback
             val pres = object : Presentation(this, hudDisplay) {
                 override fun onCreate(savedInstanceState: android.os.Bundle?) {
                     super.onCreate(savedInstanceState)
@@ -291,15 +367,100 @@ class OverlayHudService : Service() {
                             topMargin = Prefs.getHudOffsetY(this@OverlayHudService)
                         }
                     }
-                    val wv = createConfiguredWebView(url)
-                    card.addView(wv)
+                    card.addView(frame)
                     root.addView(card)
                     setContentView(root)
-                    hudWebView = wv
+                    hudWebView = activeWv
                 }
             }
             pres.show()
             hudPresentation = pres
+        }
+    }
+
+    private fun buildHudTelemetryCard(context: Context): LinearLayout {
+        val density = context.resources.displayMetrics.density
+        val cardBg = GradientDrawable().apply {
+            setColor(Color.parseColor("#E6090D14")) // 90% black glass
+            cornerRadius = 14 * density
+            setStroke((1.5f * density).toInt(), Color.parseColor("#10B981")) // Emerald stroke
+        }
+
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = cardBg
+            setPadding((12 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                leftMargin = (14 * density).toInt()
+                topMargin = (14 * density).toInt()
+            }
+        }
+
+        // Top Row: Big Turn Maneuver Icon + Distance
+        val topRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val icon = TextView(context).apply {
+            text = currentNav.maneuver
+            textSize = 24f
+            setTextColor(Color.parseColor("#10B981"))
+            setPadding(0, 0, (8 * density).toInt(), 0)
+        }
+        hudManeuverIcon = icon
+        topRow.addView(icon)
+
+        val dist = TextView(context).apply {
+            text = currentNav.distance
+            textSize = 18f
+            setTextColor(Color.WHITE)
+        }
+        hudManeuverDistance = dist
+        topRow.addView(dist)
+        card.addView(topRow)
+
+        // Middle Row: Next Road / Street
+        val street = TextView(context).apply {
+            text = currentNav.street
+            textSize = 12f
+            setTextColor(Color.parseColor("#E2E8F0"))
+            setPadding(0, (2 * density).toInt(), 0, (2 * density).toInt())
+        }
+        hudStreetName = street
+        card.addView(street)
+
+        // Bottom Strip: Arrival Time / ETA / Remaining or GPS Speed
+        val trip = TextView(context).apply {
+            text = if (currentNav.isNavigating) {
+                "${currentNav.eta} · ${currentNav.remainingDist}"
+            } else {
+                "${currentSpeedKmh} km/h · 8295 GNSS"
+            }
+            textSize = 10f
+            setTextColor(Color.parseColor("#94A3B8"))
+        }
+        hudTripSummary = trip
+        card.addView(trip)
+
+        return card
+    }
+
+    private fun updateHudCardUi(telemetry: NavTelemetry) {
+        Handler(Looper.getMainLooper()).post {
+            currentNav = telemetry
+            hudManeuverIcon?.text = telemetry.maneuver
+            hudManeuverDistance?.text = telemetry.distance
+            hudStreetName?.text = telemetry.street
+            if (telemetry.isNavigating) {
+                hudTripSummary?.text = "${telemetry.eta} · ${telemetry.remainingDist} (ETA)"
+            } else {
+                hudTripSummary?.text = "${currentSpeedKmh} km/h · 8295 GNSS Active"
+            }
         }
     }
 
@@ -319,7 +480,7 @@ class OverlayHudService : Service() {
                     setBackgroundColor(Color.argb(230, 20, 20, 30))
                 }
                 val tv = TextView(context).apply {
-                    text = "✦ ZEEKR 7X HUD PROBE ✦\n[ Display ID $displayId ]\n${targetDisplay.name}\nActive Calibration Target"
+                    text = "✦ ZEEKR 7X HUD PROBE ✦\n[ Display ID $displayId ]\n${targetDisplay.name}\nActive AR-HUD Calibration Plane"
                     setTextColor(Color.parseColor("#10B981"))
                     textSize = 28f
                     gravity = Gravity.CENTER
@@ -335,7 +496,6 @@ class OverlayHudService : Service() {
         pres.show()
         testPatternPresentation = pres
 
-        // Auto dismiss after 6 seconds
         Handler(Looper.getMainLooper()).postDelayed({
             testPatternPresentation?.dismiss()
             testPatternPresentation = null
@@ -343,14 +503,13 @@ class OverlayHudService : Service() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun createConfiguredWebView(url: String): WebView {
+    private fun createConfiguredVideoWebView(url: String): WebView {
         return WebView(this).apply {
             setBackgroundColor(Color.BLACK)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.mediaPlaybackRequiresUserGesture = false
-            settings.userAgentString =
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            settings.userAgentString = DESKTOP_UA
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, loadedUrl: String?) {
                     super.onPageFinished(view, loadedUrl)
@@ -374,6 +533,45 @@ class OverlayHudService : Service() {
         }
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createConfiguredMapsWebView(url: String, isHud: Boolean): WebView {
+        return WebView(this).apply {
+            setBackgroundColor(Color.BLACK)
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.setGeolocationEnabled(true)
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.userAgentString = MOBILE_MAPS_UA
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onGeolocationPermissionsShowPrompt(
+                    origin: String?,
+                    callback: GeolocationPermissions.Callback?
+                ) {
+                    callback?.invoke(origin, true, false)
+                }
+            }
+
+            if (isHud) {
+                val bridge = MapsTelemetryBridge { telemetry ->
+                    updateHudCardUi(telemetry)
+                }
+                addJavascriptInterface(bridge, "ZeekrNavBridge")
+            }
+
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                    super.onPageFinished(view, loadedUrl)
+                    view?.evaluateJavascript(MapsTelemetryBridge.JS_INJECT_MAPS, null)
+                    if (mapLayer == "SATELLITE") {
+                        view?.evaluateJavascript(MapsTelemetryBridge.JS_TOGGLE_SATELLITE, null)
+                    }
+                }
+            }
+            loadUrl(url)
+        }
+    }
+
     private fun setupCarAudioFocus() {
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val playbackAttributes = AudioAttributes.Builder()
@@ -384,16 +582,7 @@ class OverlayHudService : Service() {
         audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
             .setAudioAttributes(playbackAttributes)
             .setAcceptsDelayedFocusGain(true)
-            .setOnAudioFocusChangeListener { focusChange ->
-                when (focusChange) {
-                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                        // User confirmed: DO NOT duck audio volume during navigation voice prompts!
-                    }
-                    AudioManager.AUDIOFOCUS_LOSS -> {
-                        // Permanent loss
-                    }
-                }
-            }
+            .setOnAudioFocusChangeListener { /* Keep full volume; do not duck for nav announcements */ }
             .build()
 
         audioFocusRequest?.let { audioManager?.requestAudioFocus(it) }
@@ -418,31 +607,15 @@ class OverlayHudService : Service() {
             setPlaybackState(state)
 
             setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() {
-                    togglePlayPause(forcePlay = true)
-                }
-
-                override fun onPause() {
-                    togglePlayPause(forcePause = true)
-                }
-
-                override fun onFastForward() {
-                    skipVideoSeconds(10)
-                }
-
-                override fun onRewind() {
-                    skipVideoSeconds(-10)
-                }
-
-                override fun onSkipToNext() {
-                    skipVideoSeconds(10)
-                }
-
-                override fun onSkipToPrevious() {
-                    skipVideoSeconds(-10)
-                }
+                override fun onPlay() { togglePlayPause(forcePlay = true) }
+                override fun onPause() { togglePlayPause(forcePause = true) }
+                override fun onFastForward() { skipVideoSeconds(10) }
+                override fun onRewind() { skipVideoSeconds(-10) }
+                override fun onSkipToNext() { skipVideoSeconds(10) }
+                override fun onSkipToPrevious() { skipVideoSeconds(-10) }
 
                 override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    @Suppress("DEPRECATION")
                     val keyEvent = mediaButtonEvent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
                     if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
                         when (keyEvent.keyCode) {
@@ -471,9 +644,7 @@ class OverlayHudService : Service() {
         val js = """
             (function() {
                 const v = document.querySelector('video');
-                if (v) {
-                    v.currentTime = Math.max(0, v.currentTime + ($seconds));
-                }
+                if (v) { v.currentTime = Math.max(0, v.currentTime + ($seconds)); }
             })();
         """.trimIndent()
         centerWebView?.evaluateJavascript(js, null)
@@ -490,13 +661,31 @@ class OverlayHudService : Service() {
         hudWebView?.evaluateJavascript(js, null)
     }
 
-    private fun barButton(label: String, onClick: () -> Unit): TextView {
+    private fun startLocationUpdates() {
+        try {
+            locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 1f, this)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    override fun onLocationChanged(location: Location) {
+        currentSpeedKmh = (location.speed * 3.6f).toInt()
+        if (!currentNav.isNavigating) {
+            hudTripSummary?.text = "$currentSpeedKmh km/h · 8295 GNSS"
+        }
+    }
+
+    private fun barButton(label: String, onClick: (View) -> Unit): TextView {
         return TextView(this).apply {
             text = label
             setTextColor(Color.parseColor("#E6ECF5"))
             textSize = 12f
-            setPadding(18, 6, 18, 6)
-            setOnClickListener { onClick() }
+            setPadding(16, 6, 16, 6)
+            setOnClickListener { onClick(it) }
         }
     }
 
@@ -507,11 +696,14 @@ class OverlayHudService : Service() {
         hudContainer = null
         hudPresentation?.dismiss()
         hudPresentation = null
+        hudTelemetryCard = null
     }
 
     private fun cleanupWindows() {
         centerWebView?.destroy()
         centerWebView = null
+        centerMapsWebView?.destroy()
+        centerMapsWebView = null
         centerContainer?.let { runCatching { centerWm.removeView(it) } }
         centerContainer = null
         removeHudProjection()
@@ -524,14 +716,15 @@ class OverlayHudService : Service() {
             NotificationChannel(channelId, "7xTubeDash Driving Service", NotificationManager.IMPORTANCE_LOW)
         )
         val notif = Notification.Builder(this, channelId)
-            .setContentTitle("7xTubeDash Active")
-            .setContentText("Driving Pop-Up / AR-HUD Media Running")
-            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle("7xTubeDash 2.0 Active")
+            .setContentText("Google Maps AR-HUD & Floating Media Running")
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
         startForeground(2002, notif)
     }
 
     override fun onDestroy() {
+        locationManager?.removeUpdates(this)
         cleanupWindows()
         mediaSession?.release()
         audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }

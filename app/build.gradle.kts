@@ -11,8 +11,8 @@ android {
         applicationId = "com.zeekr7x.tubedash"
         minSdk = 28
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0.0-7xDash"
+        versionCode = 3
+        versionName = "2.0.0-MapsHUD"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
