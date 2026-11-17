@@ -1,70 +1,72 @@
-# 7xTubeDash · Zeekr 7X Media & AR-HUD Suite
+# 7xTubeDash 2.0 · Zeekr 7X Google Maps AR-HUD & Media Suite
 
-**7xTubeDash** is an automotive-optimized Android media player built for the **Zeekr 7X** (Snapdragon 8295 cockpit running Android 12 / Zeekr OS). It overcomes the native D-gear video lockout restriction by detaching playback into hardware-accelerated system overlay services and secondary display projection.
-
----
-
-## 🚗 Core Features for Zeekr 7X
-
-### 1. D-Gear Video Lockout Bypass
-* **Method 1A — Floating Pop-Up Window (`TYPE_APPLICATION_OVERLAY`)**:
-  * Detaches from the foreground task stack so Zeekr OS cannot suspend it when shifting into Drive.
-  * Floats directly over native Zeekr Navigation / 360° cameras.
-  * Supports **drag-to-move**, **two-finger pinch-to-resize**, **double-tap** to toggle Small (520×320) vs Large (820×480), and **edge-docking** (push to screen edge to collapse into a slim tab; tap to expand).
-* **Method 1B — Android 12 Picture-in-Picture (`onUserLeaveHint`)**:
-  * Seamless fallback PiP window.
-* **Auto-Resume Behavior**:
-  * Remembers whichever mode was last active (Center Pop-Up, AR-HUD, or Dual Output) and automatically re-engages when shifting from Park into Drive.
-
-### 2. Windshield AR-HUD Optical Projection
-* Binds to the Zeekr 7X secondary AR-HUD display via Android `DisplayManager` (`createDisplayContext` with `Presentation` fallback).
-* **Display ID Scanner & Live Test Pattern**:
-  * Cockpit displays (Display 1, Display 2, Display 3) are enumerated.
-  * One-tap **"Test Pattern"** broadcasts a 6-second high-contrast alignment card so you can verify which display ID illuminates the windshield AR-HUD.
-* **Safe-Zone Presets**:
-  * Quick presets (`Corner`, `Banner`, `Wide`) keep video playback clear of critical ADAS telemetry, speed readouts, and navigation arrows.
-  * Fine-grained sliders for Scale (%), X Offset (px), and Y Offset (px).
-
-### 3. Media Sources & Browser
-* **YouTube Desktop Player**: Custom desktop user-agent, automatic ad-skip injection, and auto-fullscreening inside floating frames.
-* **Quick URL & Bookmarks Bar**: 1-tap presets for **YouTube, Bilibili, Netflix, Disney+, and Twitch**, plus custom URL entry.
-
-### 4. Audio Focus & Steering Wheel Controls
-* **Constant High-Volume Audio**: Requests `AUDIOFOCUS_GAIN` without ducking or lowering volume during Zeekr navigation voice announcements.
-* **Steering Wheel Media Integration (`MediaSessionCompat`)**:
-  * **Play / Pause**: Steering wheel media button / toggle.
-  * **Skip Forward 10s**: Steering wheel right scroll up / next track.
-  * **Skip Backward 10s**: Steering wheel right scroll down / previous track.
+**7xTubeDash 2.0** brings **Google Maps directly to the Zeekr 7X Windshield AR-HUD** and **Center Screen Floating Pop-Up / PiP**, overcoming Zeekr OS D-gear driving restrictions.
 
 ---
 
-## 📲 How to Download & Install on Zeekr 7X
+## 🗺️ What's New in Version 2.0
 
-### Method A: Direct Download via Zeekr 7X In-Car Browser (Recommended)
-1. In your Zeekr 7X, open the built-in Web Browser or App Lab browser.
-2. Navigate to your GitHub repository Releases page:
+### 1. Google Maps on Windshield AR-HUD
+* **Full Map Projection**: Projects full Google Maps directly onto the Zeekr 7X AR-HUD projection plane via `DisplayManager` secondary display context (with `Presentation` fallback).
+* **Default & Satellite Layers**: 1-tap toggle between **Vector Street Map** and **Photorealistic Satellite Imagery**.
+* **Top-Left HUD Telemetry Card**:
+  * Pinned in the top-left corner of the windshield HUD.
+  * **Bold Turn Maneuver Arrow**: `↱` Right, `↰` Left, `⇡` Straight, `↺` U-turn, `⮬` Slight Right in high-contrast emerald green.
+  * **Distance to Next Maneuver**: e.g., `250 m` or `1.2 km`.
+  * **Next Street / Highway**: e.g., `Rama IX Rd` / `Highway 101 N`.
+  * **Trip Telemetry**: Arrival time (`22:45`), ETA duration (`18 min`), and remaining distance (`14 km`).
+  * **Cruising Mode**: When not navigating an active route, displays live vehicle speed (`72 km/h`) and GNSS status.
+
+### 2. Independent Multi-Display Routing
+* **Center Screen & AR-HUD Multitasking**:
+  * Run **YouTube on the Center Pop-Up** (or full center display) while projecting **Google Maps on the Windshield AR-HUD**.
+  * Or run **Google Maps on both** (Center Pop-Up + AR-HUD).
+  * Or run **YouTube on both**.
+  * 1-tap switcher on the Left Rail and on the Floating Window top bar.
+
+### 3. Center Screen Remote & Sync
+* Touch the Center Screen or Floating Pop-Up to search destinations, click places, zoom in/out (`+` / `-`), toggle Satellite view, or recenter your location.
+* Tap **"Push to HUD"** on the center screen to beam your active Google Maps route directly to the windshield AR-HUD.
+
+### 4. Native Vehicle GPS & Audio Mixing
+* **High-Precision Snapdragon 8295 GNSS**: Directly connects to Zeekr 7X's hardware GPS receiver without requiring Google Play Services (GMS).
+* **Dual Audio Mixing**: Google Maps turn-by-turn spoken guidance plays alongside media (YouTube/music) at full volume without ducking or cutting off your audio.
+
+---
+
+## 📲 How to Download & Install Directly on Zeekr 7X
+
+### Method A: Direct Download via Zeekr In-Car Browser (Recommended)
+1. Push this repository to your GitHub account:
+   ```bash
+   git remote add origin https://github.com/<your-username>/<your-repo-name>.git
+   git push -u origin main
+   git tag v2.0.0
+   git push origin v2.0.0
    ```
-   https://github.com/<your-username>/<your-repo>/releases/latest/download/7xTubeDash-arm64.apk
+2. Open the built-in browser on your Zeekr 7X center screen and enter:
    ```
-3. Once downloaded, open **App Lab / File Manager** and install the APK.
-4. **⚠️ Critical Zeekr Installation Step**: When the installer finishes, tap **"Back"** at the top-left corner. **Never tap "Open"** directly from the installer package manager.
-5. Launch **7xTubeDash** from your Zeekr app drawer.
-6. Grant the **"Appear on top"** (`SYSTEM_ALERT_WINDOW`) permission when prompted.
+   https://github.com/<your-username>/<your-repo-name>/releases/latest/download/7xTubeDash-arm64.apk
+   ```
+3. Open **App Lab / File Manager** and install the APK.
+4. **⚠️ Critical Zeekr Installation Rule**: When the installer finishes, tap **"Back"** at the top-left corner. **Never tap "Open"** directly from the installer package manager.
+5. Launch **7xTubeDash** from the Zeekr app drawer and grant **"Appear on top"** (`SYSTEM_ALERT_WINDOW`) and **Location** permissions.
+
+### Method B: USB Drive
+Copy [`release/7xTubeDash-arm64.apk`](release/7xTubeDash-arm64.apk) to a USB stick, plug into the center console, and install via App Lab.
 
 ---
 
-## 🛠 Local & Cloud Build Instructions
+## 🚗 In-Car Controls Quick Reference
 
-### GitHub Actions (Cloud Builder)
-* Push this repository to GitHub or trigger the **Build 7xTubeDash APK** action under the **Actions** tab.
-* The workflow builds `7xTubeDash-arm64.apk` with JDK 17 and publishes it as a downloadable release asset.
-
-### Local Build on Mac
-Run the automated build script:
-```bash
-./scripts/build-local.sh
-```
-The compiled APK will be output to:
-```
-release/7xTubeDash-arm64.apk
-```
+| Action | Control |
+|---|---|
+| **Toggle Street / Satellite Layer** | Tap `Sat/Def` on Left Rail or `Layer` on Floating Window |
+| **Switch Center Pop-Up (Tube ↔ Maps)** | Tap `To Maps` / `To Tube` on Floating Window top bar |
+| **Dock Window into Thin Edge Tab** | Tap `Dock` or push window near screen edge |
+| **Resize Floating Window** | Two-finger pinch or double-tap top bar for Small/Large |
+| **Zoom Maps (+ / -)** | Tap `Zoom +` or `Zoom -` on Center Maps screen |
+| **Recenter Vehicle Location** | Tap `Recenter` on Center Maps screen |
+| **Media Play / Pause** | Steering wheel media button toggle |
+| **Skip Video 10s** | Steering wheel right scroll wheel up (+10s) / down (-10s) |
+| **Test Windshield HUD Display** | Settings → Tap `Test Pattern <ID>` (flashes 6s test card on HUD) |
