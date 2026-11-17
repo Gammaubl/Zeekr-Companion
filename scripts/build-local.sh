@@ -17,7 +17,7 @@ echo "Android SDK: $ANDROID_HOME"
 cd "$PROJECT_ROOT"
 if [ ! -f ./gradlew ]; then
     echo "Initializing Gradle Wrapper..."
-    $HOME/.local/share/android-build-tools/gradle-8.7/bin/gradle wrapper --gradle-version 8.7
+    $HOME/.local/share/android-build-tools/gradle-8.9/bin/gradle wrapper --gradle-version 8.9
 fi
 
 ./gradlew assembleRelease --stacktrace
