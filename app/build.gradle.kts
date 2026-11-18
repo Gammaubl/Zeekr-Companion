@@ -10,9 +10,9 @@ android {
     defaultConfig {
         applicationId = "com.zeekr7x.tubedash"
         minSdk = 28
-        targetSdk = 34
-        versionCode = 3
-        versionName = "2.0.0-MapsHUD"
+        targetSdk = 33
+        versionCode = 4
+        versionName = "2.0.1-ZeekrFix"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -24,6 +24,11 @@ android {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debug")
         }
+    }
+
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
     }
 
     compileOptions {

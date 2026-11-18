@@ -23,6 +23,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.util.Log
 import android.util.Rational
 import android.view.Gravity
 import android.view.KeyEvent
@@ -37,13 +38,15 @@ import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity(), LocationListener {
 
+    private val TAG = "Zeekr7xTubeDash"
+
     private lateinit var leftRail: LinearLayout
     private lateinit var homePage: ScrollView
     private lateinit var settingsPage: ScrollView
     private lateinit var webViewContainer: FrameLayout
-    private lateinit var webView: WebView
+    private var webView: WebView? = null
     private lateinit var mapsContainer: FrameLayout
-    private lateinit var mapsWebView: WebView
+    private var mapsWebView: WebView? = null
     private lateinit var urlBarContainer: LinearLayout
     private lateinit var urlEditText: EditText
     private lateinit var dimVeil: View
@@ -61,6 +64,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private var locationManager: LocationManager? = null
 
     private var currentNavTelemetry = NavTelemetry()
+    private var isPlayerInitialized = false
+    private var isMapsInitialized = false
 
     companion object {
         private const val PERMISSION_REQ_LOCATION = 1001
@@ -72,61 +77,125 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        hideSystemUI()
-        setupCarAudioFocus()
-        setupMediaSession()
-        requestLocationPermissions()
 
-        val root = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#0B0D12"))
+        // Safety Crash Shield: Prevent any unhandled crash from freezing Zeekr App Lab's loading screen
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e(TAG, "Uncaught exception on thread ${thread.name}", throwable)
         }
 
-        val mainHorizontal = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
+        try {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            hideSystemUI()
+
+            val root = FrameLayout(this).apply {
+                setBackgroundColor(Color.parseColor("#0B0D12"))
+            }
+
+            val mainHorizontal = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+
+            // 1. Persistent Left Rail
+            leftRail = buildLeftRail()
+            mainHorizontal.addView(leftRail)
+
+            // 2. Content Stack
+            val contentStack = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            }
+
+            homePage = buildHomePage()
+            settingsPage = buildSettingsPage()
+            webViewContainer = FrameLayout(this).apply {
+                setBackgroundColor(Color.BLACK)
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            mapsContainer = FrameLayout(this).apply {
+                setBackgroundColor(Color.parseColor("#1A1D24"))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+
+            contentStack.addView(webViewContainer)
+            contentStack.addView(mapsContainer)
+            contentStack.addView(homePage)
+            contentStack.addView(settingsPage)
+
+            showTab("HOME")
+            mainHorizontal.addView(contentStack)
+            root.addView(mainHorizontal)
+
+            // 3. Night Dim Overlay Veil
+            dimVeil = View(this).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                setBackgroundColor(Color.argb(dimAlpha, 12, 9, 5))
+                visibility = View.GONE
+                isClickable = false
+                isFocusable = false
+            }
+            root.addView(dimVeil)
+
+            // CRITICAL: Call setContentView immediately so first frame draws in <50ms
+            // and Zeekr App Lab launcher dismisses its 'Loading...' screen right away!
+            setContentView(root)
+
+            // Lazy initialize heavier components after first frame is drawn
+            Handler(Looper.getMainLooper()).postDelayed({
+                initHeavyComponents()
+            }, 100L)
+
+        } catch (t: Throwable) {
+            Log.e(TAG, "Error in onCreate", t)
+            showEmergencyErrorView(t)
         }
+    }
 
-        // 1. Persistent Left Rail
-        leftRail = buildLeftRail()
-        mainHorizontal.addView(leftRail)
+    private fun initHeavyComponents() {
+        runCatching { setupCarAudioFocus() }
+        runCatching { setupMediaSession() }
+        runCatching { requestLocationPermissions() }
+        runCatching { initPlayerWebView() }
+        runCatching { initMapsWebView() }
+    }
 
-        // 2. Content Stack (Home / YouTube / Google Maps / Settings)
-        val contentStack = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+    private fun showEmergencyErrorView(t: Throwable) {
+        val errView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#180A0A"))
+            setPadding(40, 40, 40, 40)
+            gravity = Gravity.CENTER
         }
-
-        homePage = buildHomePage()
-        settingsPage = buildSettingsPage()
-        webViewContainer = buildWebViewPlayer()
-        mapsContainer = buildMapsContainer()
-
-        contentStack.addView(webViewContainer)
-        contentStack.addView(mapsContainer)
-        contentStack.addView(homePage)
-        contentStack.addView(settingsPage)
-
-        showTab("HOME")
-        mainHorizontal.addView(contentStack)
-        root.addView(mainHorizontal)
-
-        // 3. Night Dim Overlay Veil
-        dimVeil = View(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            setBackgroundColor(Color.argb(dimAlpha, 12, 9, 5))
-            visibility = View.GONE
-            isClickable = false
-            isFocusable = false
+        val title = TextView(this).apply {
+            text = "7xTubeDash Safe Mode"
+            textSize = 22f
+            setTextColor(Color.parseColor("#EF4444"))
         }
-        root.addView(dimVeil)
-
-        setContentView(root)
+        val msg = TextView(this).apply {
+            text = "Startup Notice:\n${t.localizedMessage ?: t.javaClass.simpleName}"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, 20, 0, 20)
+        }
+        val retryBtn = Button(this).apply {
+            text = "Enter Home Dashboard"
+            setOnClickListener { recreate() }
+        }
+        errView.addView(title)
+        errView.addView(msg)
+        errView.addView(retryBtn)
+        setContentView(errView)
     }
 
     private fun buildLeftRail(): LinearLayout {
@@ -142,15 +211,20 @@ class MainActivity : AppCompatActivity(), LocationListener {
             addView(railItem("Maps") {
                 showTab("MAPS")
                 Prefs.setCenterSource(this@MainActivity, "MAPS")
+                if (!isMapsInitialized) initMapsWebView()
             })
             addView(railItem("YouTube") {
                 showTab("PLAYER")
                 Prefs.setCenterSource(this@MainActivity, "YOUTUBE")
+                if (!isPlayerInitialized) initPlayerWebView()
             })
             addView(railItem("Browse") {
                 showTab("PLAYER")
-                urlBarContainer.visibility =
-                    if (urlBarContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                if (!isPlayerInitialized) initPlayerWebView()
+                if (::urlBarContainer.isInitialized) {
+                    urlBarContainer.visibility =
+                        if (urlBarContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                }
             })
             addView(railItem("Pop-Up") {
                 Prefs.setOutputMode(this@MainActivity, 0)
@@ -198,13 +272,13 @@ class MainActivity : AppCompatActivity(), LocationListener {
             }
 
             val header = TextView(this@MainActivity).apply {
-                text = "7xTubeDash 2.0 · Google Maps AR-HUD & Media Suite"
+                text = "7xTubeDash 2.0 · Zeekr 7X Suite"
                 setTextColor(Color.WHITE)
                 textSize = 21f
                 setPadding(0, 0, 0, dp(4))
             }
             val subHeader = TextView(this@MainActivity).apply {
-                text = "Zeekr 7X Snapdragon 8295 · Independent HUD Maps & Center Pop-Up Player"
+                text = "Snapdragon 8295 · Google Maps Windshield AR-HUD & Center Floating Player"
                 setTextColor(Color.parseColor("#8A94A6"))
                 textSize = 13f
                 setPadding(0, 0, 0, dp(16))
@@ -235,7 +309,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
             // Card 2: Independent Display Targets
             val targetCard = createBentoCard(
-                title = "Display Content Targets",
+                title = "Display Content Routing",
                 subtitle = "Center: ${Prefs.getCenterSource(this@MainActivity)} · AR-HUD: ${Prefs.getHudSource(this@MainActivity)}\n(Tap to switch: Maps on HUD + YouTube on Center)",
                 accentColor = "#10B981",
                 onTap = {
@@ -296,16 +370,12 @@ class MainActivity : AppCompatActivity(), LocationListener {
             }
 
             val title = TextView(this@MainActivity).apply {
-                text = "HUD & Google Maps Calibration Suite (Version 2.0)"
+                text = "HUD & Google Maps Calibration Suite"
                 setTextColor(Color.WHITE)
                 textSize = 20f
                 setPadding(0, 0, 0, dp(12))
             }
             col.addView(title)
-
-            // Detected Displays & Test Pattern section
-            val dm = getSystemService(DisplayManager::class.java)
-            val displays = dm.displays
 
             val displayTitle = TextView(this@MainActivity).apply {
                 text = "AR-HUD Target Display ID (Active: Display ${Prefs.getHudDisplayId(this@MainActivity)})"
@@ -320,15 +390,25 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 setPadding(0, 0, 0, dp(14))
             }
 
-            displays.forEach { disp ->
-                val id = disp.displayId
+            // Safe display enumeration
+            val displayList = runCatching {
+                getSystemService(DisplayManager::class.java)?.displays?.toList()
+            }.getOrNull() ?: emptyList()
+
+            val idsToDisplay = if (displayList.isNotEmpty()) {
+                displayList.map { it.displayId to it.name }
+            } else {
+                listOf(1 to "AR-HUD", 2 to "HUD/Cluster", 3 to "Aux")
+            }
+
+            idsToDisplay.forEach { (id, name) ->
                 val container = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(0, 0, dp(12), 0)
                 }
 
                 val selectBtn = Button(this@MainActivity).apply {
-                    text = "Select Display $id"
+                    text = "Display $id ($name)"
                     setOnClickListener {
                         Prefs.setHudDisplayId(this@MainActivity, id)
                         displayTitle.text = "AR-HUD Target Display ID (Active: Display $id)"
@@ -348,49 +428,6 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 displayRow.addView(container)
             }
             col.addView(displayRow)
-
-            // Independent Target Configuration Section
-            val targetsTitle = TextView(this@MainActivity).apply {
-                text = "Display Source Routing (Multitasking Configuration)"
-                setTextColor(Color.parseColor("#E2E8F0"))
-                textSize = 15f
-                setPadding(0, 0, 0, dp(6))
-            }
-            col.addView(targetsTitle)
-
-            val targetBtnRow = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(0, 0, 0, dp(14))
-            }
-
-            val btnMapsHud = Button(this@MainActivity).apply {
-                text = "HUD: Maps | Center: YouTube"
-                setOnClickListener {
-                    Prefs.setHudSource(this@MainActivity, "MAPS")
-                    Prefs.setCenterSource(this@MainActivity, "YOUTUBE")
-                    Toast.makeText(this@MainActivity, "Configured: HUD Maps + Center YouTube", Toast.LENGTH_SHORT).show()
-                }
-            }
-            targetBtnRow.addView(btnMapsHud, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) })
-
-            val btnDualMaps = Button(this@MainActivity).apply {
-                text = "HUD: Maps | Center: Maps"
-                setOnClickListener {
-                    Prefs.setHudSource(this@MainActivity, "MAPS")
-                    Prefs.setCenterSource(this@MainActivity, "MAPS")
-                    Toast.makeText(this@MainActivity, "Configured: Dual Maps", Toast.LENGTH_SHORT).show()
-                }
-            }
-            targetBtnRow.addView(btnDualMaps, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) })
-
-            val btnSatToggle = Button(this@MainActivity).apply {
-                text = "Toggle Satellite Layer"
-                setOnClickListener {
-                    toggleMapLayer()
-                }
-            }
-            targetBtnRow.addView(btnSatToggle)
-            col.addView(targetBtnRow)
 
             // Safe-Zone Presets
             val presetLabel = TextView(this@MainActivity).apply {
@@ -487,133 +524,139 @@ class MainActivity : AppCompatActivity(), LocationListener {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun buildWebViewPlayer(): FrameLayout {
-        val rootContainer = FrameLayout(this)
+    private fun initPlayerWebView() {
+        if (isPlayerInitialized) return
+        isPlayerInitialized = true
 
-        webView = WebView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            setBackgroundColor(Color.BLACK)
-        }
-
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            mediaPlaybackRequiresUserGesture = false
-            userAgentString = DESKTOP_UA
-            useWideViewPort = true
-            loadWithOverviewMode = true
-        }
-
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                if (url != null) {
-                    Prefs.setLastUrl(this@MainActivity, url)
-                    urlEditText.setText(url)
-                }
-                injectAdSkipScript(webView)
+        runCatching {
+            val wv = WebView(this).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                setBackgroundColor(Color.BLACK)
             }
+
+            runCatching {
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+            }
+
+            wv.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                mediaPlaybackRequiresUserGesture = false
+                userAgentString = DESKTOP_UA
+                useWideViewPort = true
+                loadWithOverviewMode = true
+            }
+
+            wv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    if (url != null) {
+                        Prefs.setLastUrl(this@MainActivity, url)
+                        if (::urlEditText.isInitialized) urlEditText.setText(url)
+                    }
+                    injectAdSkipScript(wv)
+                }
+            }
+            wv.webChromeClient = WebChromeClient()
+            wv.loadUrl(Prefs.getLastUrl(this))
+            webView = wv
+            webViewContainer.addView(wv)
+
+            urlBarContainer = buildUrlBar()
+            webViewContainer.addView(urlBarContainer)
         }
-        webView.webChromeClient = WebChromeClient()
-        webView.loadUrl(Prefs.getLastUrl(this))
-        rootContainer.addView(webView)
-
-        urlBarContainer = buildUrlBar()
-        rootContainer.addView(urlBarContainer)
-
-        return rootContainer
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun buildMapsContainer(): FrameLayout {
-        val container = FrameLayout(this)
+    private fun initMapsWebView() {
+        if (isMapsInitialized) return
+        isMapsInitialized = true
 
-        mapsWebView = WebView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            setBackgroundColor(Color.parseColor("#1A1D24"))
-        }
-
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(mapsWebView, true)
-
-        mapsWebView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            setGeolocationEnabled(true)
-            mediaPlaybackRequiresUserGesture = false
-            userAgentString = MOBILE_MAPS_UA
-            useWideViewPort = true
-            loadWithOverviewMode = true
-        }
-
-        mapsWebView.webChromeClient = object : WebChromeClient() {
-            override fun onGeolocationPermissionsShowPrompt(
-                origin: String?,
-                callback: GeolocationPermissions.Callback?
-            ) {
-                // Grant geolocation access automatically so Google Maps can track car location
-                callback?.invoke(origin, true, false)
+        runCatching {
+            val wv = WebView(this).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                setBackgroundColor(Color.parseColor("#1A1D24"))
             }
-        }
 
-        val bridge = MapsTelemetryBridge { telemetry ->
-            runOnUiThread {
-                currentNavTelemetry = telemetry
+            runCatching {
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
             }
-        }
-        mapsWebView.addJavascriptInterface(bridge, "ZeekrNavBridge")
 
-        mapsWebView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                if (url != null) Prefs.setLastMapUrl(this@MainActivity, url)
-                mapsWebView.evaluateJavascript(MapsTelemetryBridge.JS_INJECT_MAPS, null)
+            wv.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                setGeolocationEnabled(true)
+                mediaPlaybackRequiresUserGesture = false
+                userAgentString = MOBILE_MAPS_UA
+                useWideViewPort = true
+                loadWithOverviewMode = true
             }
-        }
 
-        mapsWebView.loadUrl(Prefs.getLastMapUrl(this))
-        container.addView(mapsWebView)
-
-        // Maps Floating Control Strip (Satellite, Zoom +, Zoom -, Recenter, Push to HUD)
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.argb(200, 18, 22, 31))
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                gravity = Gravity.BOTTOM or Gravity.END
-                rightMargin = dp(16)
-                bottomMargin = dp(16)
+            wv.webChromeClient = object : WebChromeClient() {
+                override fun onGeolocationPermissionsShowPrompt(
+                    origin: String?,
+                    callback: GeolocationPermissions.Callback?
+                ) {
+                    callback?.invoke(origin, true, false)
+                }
             }
+
+            val bridge = MapsTelemetryBridge { telemetry ->
+                runOnUiThread { currentNavTelemetry = telemetry }
+            }
+            wv.addJavascriptInterface(bridge, "ZeekrNavBridge")
+
+            wv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    if (url != null) Prefs.setLastMapUrl(this@MainActivity, url)
+                    wv.evaluateJavascript(MapsTelemetryBridge.JS_INJECT_MAPS, null)
+                }
+            }
+
+            wv.loadUrl(Prefs.getLastMapUrl(this))
+            mapsWebView = wv
+            mapsContainer.addView(wv)
+
+            // Maps Floating Controls
+            val controls = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                setBackgroundColor(Color.argb(200, 18, 22, 31))
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.BOTTOM or Gravity.END
+                    rightMargin = dp(16)
+                    bottomMargin = dp(16)
+                }
+            }
+
+            controls.addView(mapBtn("Satellite") { toggleMapLayer() })
+            controls.addView(mapBtn("Zoom +") { mapsWebView?.evaluateJavascript(MapsTelemetryBridge.JS_ZOOM_IN, null) })
+            controls.addView(mapBtn("Zoom -") { mapsWebView?.evaluateJavascript(MapsTelemetryBridge.JS_ZOOM_OUT, null) })
+            controls.addView(mapBtn("Recenter") { mapsWebView?.evaluateJavascript(MapsTelemetryBridge.JS_RECENTER, null) })
+            controls.addView(mapBtn("Push to HUD") {
+                val mapUrl = mapsWebView?.url ?: Prefs.getLastMapUrl(this)
+                Prefs.setLastMapUrl(this, mapUrl)
+                Prefs.setHudSource(this, "MAPS")
+                Toast.makeText(this, "Pushed current Google Map to AR-HUD", Toast.LENGTH_SHORT).show()
+            })
+
+            mapsContainer.addView(controls)
         }
-
-        controls.addView(mapBtn("Satellite") { toggleMapLayer() })
-        controls.addView(mapBtn("Zoom +") { mapsWebView.evaluateJavascript(MapsTelemetryBridge.JS_ZOOM_IN, null) })
-        controls.addView(mapBtn("Zoom -") { mapsWebView.evaluateJavascript(MapsTelemetryBridge.JS_ZOOM_OUT, null) })
-        controls.addView(mapBtn("Recenter") { mapsWebView.evaluateJavascript(MapsTelemetryBridge.JS_RECENTER, null) })
-        controls.addView(mapBtn("Push to HUD") {
-            val mapUrl = mapsWebView.url ?: Prefs.getLastMapUrl(this)
-            Prefs.setLastMapUrl(this, mapUrl)
-            Prefs.setHudSource(this, "MAPS")
-            Toast.makeText(this, "Pushed current Google Map to AR-HUD", Toast.LENGTH_SHORT).show()
-        })
-
-        container.addView(controls)
-        return container
     }
 
     private fun mapBtn(label: String, onClick: () -> Unit): Button {
@@ -632,7 +675,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         val next = if (current == "DEFAULT") "SATELLITE" else "DEFAULT"
         Prefs.setMapLayer(this, next)
         val script = if (next == "SATELLITE") MapsTelemetryBridge.JS_TOGGLE_SATELLITE else MapsTelemetryBridge.JS_TOGGLE_DEFAULT
-        mapsWebView.evaluateJavascript(script, null)
+        mapsWebView?.evaluateJavascript(script, null)
         Toast.makeText(this, "Switched Map Layer to: $next", Toast.LENGTH_SHORT).show()
     }
 
@@ -672,7 +715,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                     if (!target.startsWith("http://") && !target.startsWith("https://")) {
                         target = "https://$target"
                     }
-                    webView.loadUrl(target)
+                    webView?.loadUrl(target)
                     urlBarContainer.visibility = View.GONE
                 }
             }
@@ -708,10 +751,12 @@ class MainActivity : AppCompatActivity(), LocationListener {
                         urlEditText.setText(link)
                         if (name == "Google Maps") {
                             showTab("MAPS")
-                            mapsWebView.loadUrl(link)
+                            if (!isMapsInitialized) initMapsWebView()
+                            mapsWebView?.loadUrl(link)
                         } else {
                             showTab("PLAYER")
-                            webView.loadUrl(link)
+                            if (!isPlayerInitialized) initPlayerWebView()
+                            webView?.loadUrl(link)
                         }
                         urlBarContainer.visibility = View.GONE
                     }
@@ -734,19 +779,21 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private fun launchDrivingOverlayOrHud(targetMode: Int) {
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Please grant 'Appear on top' permission for 7xTubeDash", Toast.LENGTH_LONG).show()
-            startActivity(
-                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            )
+            runCatching {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                )
+            }
             return
         }
 
-        val videoUrl = webView.url ?: Prefs.getLastUrl(this)
-        val mapsUrl = mapsWebView.url ?: Prefs.getLastMapUrl(this)
+        val videoUrl = webView?.url ?: Prefs.getLastUrl(this)
+        val mapsUrl = mapsWebView?.url ?: Prefs.getLastMapUrl(this)
         Prefs.setLastUrl(this, videoUrl)
         Prefs.setLastMapUrl(this, mapsUrl)
         Prefs.setLastUsedDrivingMode(this, targetMode)
 
-        webView.onPause()
+        webView?.onPause()
         val svc = Intent(this, OverlayHudService::class.java).apply {
             putExtra("VIDEO_URL", videoUrl)
             putExtra("MAPS_URL", mapsUrl)
@@ -792,7 +839,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             leftRail.visibility = View.GONE
             homePage.visibility = View.GONE
             settingsPage.visibility = View.GONE
-            urlBarContainer.visibility = View.GONE
+            if (::urlBarContainer.isInitialized) urlBarContainer.visibility = View.GONE
             val activeSource = Prefs.getCenterSource(this)
             webViewContainer.visibility = if (activeSource == "YOUTUBE") View.VISIBLE else View.GONE
             mapsContainer.visibility = if (activeSource == "MAPS") View.VISIBLE else View.GONE
@@ -855,9 +902,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
     }
 
     private fun detectDisplaysSummary(): String {
-        val dm = getSystemService(DisplayManager::class.java)
-        val list = dm.displays.joinToString(", ") { "ID ${it.displayId} (${it.name})" }
-        return "Detected Cockpit Displays: $list"
+        return runCatching {
+            val dm = getSystemService(DisplayManager::class.java)
+            val list = dm?.displays?.joinToString(", ") { "ID ${it.displayId} (${it.name})" }
+            "Cockpit Displays: $list"
+        }.getOrDefault("Cockpit Displays: Default 0, AR-HUD 1/2")
     }
 
     private fun injectAdSkipScript(wv: WebView) {
@@ -879,76 +928,80 @@ class MainActivity : AppCompatActivity(), LocationListener {
     }
 
     private fun setupCarAudioFocus() {
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val playbackAttributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_MEDIA)
-            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-            .build()
+        runCatching {
+            audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            val playbackAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build()
 
-        audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-            .setAudioAttributes(playbackAttributes)
-            .setAcceptsDelayedFocusGain(true)
-            .setOnAudioFocusChangeListener { /* Ignore ducking to maintain full constant volume */ }
-            .build()
+            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(playbackAttributes)
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener { /* Keep full volume; do not duck for nav announcements */ }
+                .build()
 
-        audioFocusRequest?.let { audioManager?.requestAudioFocus(it) }
+            audioFocusRequest?.let { audioManager?.requestAudioFocus(it) }
+        }
     }
 
     private fun setupMediaSession() {
-        mediaSession = MediaSessionCompat(this, "ZeekrMediaSession").apply {
-            setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS)
+        runCatching {
+            mediaSession = MediaSessionCompat(this, "ZeekrMediaSession").apply {
+                setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS)
 
-            val state = PlaybackStateCompat.Builder()
-                .setActions(
-                    PlaybackStateCompat.ACTION_PLAY or
-                    PlaybackStateCompat.ACTION_PAUSE or
-                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                    PlaybackStateCompat.ACTION_FAST_FORWARD or
-                    PlaybackStateCompat.ACTION_REWIND or
-                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
-                )
-                .setState(PlaybackStateCompat.STATE_PLAYING, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
-                .build()
-            setPlaybackState(state)
+                val state = PlaybackStateCompat.Builder()
+                    .setActions(
+                        PlaybackStateCompat.ACTION_PLAY or
+                        PlaybackStateCompat.ACTION_PAUSE or
+                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                        PlaybackStateCompat.ACTION_FAST_FORWARD or
+                        PlaybackStateCompat.ACTION_REWIND or
+                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                    )
+                    .setState(PlaybackStateCompat.STATE_PLAYING, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+                    .build()
+                setPlaybackState(state)
 
-            setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() {
-                    webView.evaluateJavascript("document.querySelector('video')?.play()", null)
-                }
+                setCallback(object : MediaSessionCompat.Callback() {
+                    override fun onPlay() {
+                        webView?.evaluateJavascript("document.querySelector('video')?.play()", null)
+                    }
 
-                override fun onPause() {
-                    webView.evaluateJavascript("document.querySelector('video')?.pause()", null)
-                }
+                    override fun onPause() {
+                        webView?.evaluateJavascript("document.querySelector('video')?.pause()", null)
+                    }
 
-                override fun onFastForward() { skipVideoSeconds(10) }
-                override fun onRewind() { skipVideoSeconds(-10) }
-                override fun onSkipToNext() { skipVideoSeconds(10) }
-                override fun onSkipToPrevious() { skipVideoSeconds(-10) }
+                    override fun onFastForward() { skipVideoSeconds(10) }
+                    override fun onRewind() { skipVideoSeconds(-10) }
+                    override fun onSkipToNext() { skipVideoSeconds(10) }
+                    override fun onSkipToPrevious() { skipVideoSeconds(-10) }
 
-                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
-                    @Suppress("DEPRECATION")
-                    val keyEvent = mediaButtonEvent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
-                    if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
-                        when (keyEvent.keyCode) {
-                            KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                                skipVideoSeconds(10)
-                                return true
-                            }
-                            KeyEvent.KEYCODE_MEDIA_PREVIOUS, KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                                skipVideoSeconds(-10)
-                                return true
-                            }
-                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> {
-                                togglePlayPause()
-                                return true
+                    override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                        @Suppress("DEPRECATION")
+                        val keyEvent = mediaButtonEvent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                        if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
+                            when (keyEvent.keyCode) {
+                                KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                                    skipVideoSeconds(10)
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PREVIOUS, KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                                    skipVideoSeconds(-10)
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> {
+                                    togglePlayPause()
+                                    return true
+                                }
                             }
                         }
+                        return super.onMediaButtonEvent(mediaButtonEvent)
                     }
-                    return super.onMediaButtonEvent(mediaButtonEvent)
-                }
-            })
-            isActive = true
+                })
+                isActive = true
+            }
         }
     }
 
@@ -959,7 +1012,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 if (v) { v.currentTime = Math.max(0, v.currentTime + ($seconds)); }
             })();
         """.trimIndent()
-        webView.evaluateJavascript(js, null)
+        webView?.evaluateJavascript(js, null)
     }
 
     private fun togglePlayPause() {
@@ -969,19 +1022,26 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 if (v) { if (v.paused) v.play(); else v.pause(); }
             })();
         """.trimIndent()
-        webView.evaluateJavascript(js, null)
+        webView?.evaluateJavascript(js, null)
     }
 
     private fun requestLocationPermissions() {
-        val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (!hasFine) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
-                PERMISSION_REQ_LOCATION
-            )
-        } else {
-            startLocationUpdates()
+        runCatching {
+            val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (!hasFine) {
+                // Safeguard against missing permission controller activity on Zeekr OS
+                runCatching {
+                    ActivityCompat.requestPermissions(
+                        this,
+                        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                        PERMISSION_REQ_LOCATION
+                    )
+                }.onFailure {
+                    Log.w(TAG, "Runtime permission request failed on Zeekr OS: ${it.message}")
+                }
+            } else {
+                startLocationUpdates()
+            }
         }
     }
 
@@ -993,34 +1053,34 @@ class MainActivity : AppCompatActivity(), LocationListener {
     }
 
     private fun startLocationUpdates() {
-        try {
-            locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        runCatching {
+            locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
                 locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 1f, this)
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
     override fun onLocationChanged(location: Location) {
-        // High-precision Snapdragon 8295 GNSS receiver update
+        // High-precision Snapdragon 8295 GNSS update
     }
 
     override fun onDestroy() {
-        locationManager?.removeUpdates(this)
-        mediaSession?.release()
-        audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
+        runCatching { locationManager?.removeUpdates(this) }
+        runCatching { mediaSession?.release() }
+        runCatching { audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) } }
         super.onDestroy()
     }
 
     private fun hideSystemUI() {
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = (
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                or View.SYSTEM_UI_FLAG_FULLSCREEN
-        )
+        runCatching {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+            )
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

@@ -287,8 +287,8 @@ class OverlayHudService : Service(), LocationListener {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun showArHudProjection(videoUrl: String, mapsUrl: String) {
-        val dm = getSystemService(DisplayManager::class.java)
-        val allDisplays = dm.displays
+        val dm = runCatching { getSystemService(DisplayManager::class.java) }.getOrNull()
+        val allDisplays = runCatching { dm?.displays }.getOrNull() ?: emptyArray()
         val preferredId = Prefs.getHudDisplayId(this)
 
         val hudDisplay = allDisplays.firstOrNull { it.displayId == preferredId }
@@ -303,7 +303,7 @@ class OverlayHudService : Service(), LocationListener {
             return
         }
 
-        val hudContext = createDisplayContext(hudDisplay)
+        val hudContext = runCatching { createDisplayContext(hudDisplay) }.getOrNull() ?: this
         val hudMetrics = hudContext.resources.displayMetrics
         val scalePct = Prefs.getHudScale(this) / 100f
         val hudW = (hudMetrics.widthPixels * scalePct).toInt().coerceAtLeast(360)
@@ -465,8 +465,8 @@ class OverlayHudService : Service(), LocationListener {
     }
 
     private fun showTestPatternOnDisplay(displayId: Int) {
-        val dm = getSystemService(DisplayManager::class.java)
-        val targetDisplay = dm.displays.firstOrNull { it.displayId == displayId }
+        val dm = runCatching { getSystemService(DisplayManager::class.java) }.getOrNull()
+        val targetDisplay = runCatching { dm?.displays?.firstOrNull { it.displayId == displayId } }.getOrNull()
         if (targetDisplay == null) {
             Toast.makeText(this, "Display ID $displayId not found!", Toast.LENGTH_SHORT).show()
             return
